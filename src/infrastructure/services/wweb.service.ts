@@ -13,7 +13,7 @@ export class WwebService implements OnModuleInit {
     this.client = new Client({
       authStrategy: new LocalAuth(),
       puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        args: ['--no-sandbox'],
       },
     });
 
@@ -76,7 +76,7 @@ export class WwebService implements OnModuleInit {
     to: string;
     message: string;
   }): Promise<void> {
-    this.logger.warn(message);
+    this.logger.log(message);
     const number = to.endsWith('@c.us') ? to : `${to}@c.us`;
     await this.client.sendMessage(number, message);
   }
