@@ -45,6 +45,14 @@ export function toWhatsappException(
   const raw = error instanceof Error ? error.message : String(error);
   const message = raw.toLowerCase();
 
+  // A malformed id is the caller's mistake, not a missing resource.
+  if (message.includes('invalid serialized')) {
+    return new WhatsappException(
+      `${context}: malformed message id. Use the id returned by the send endpoints, e.g. true_573001234567@c.us_3EB0ABC123_out.`,
+      HttpStatus.BAD_REQUEST,
+    );
+  }
+
   if (
     message.includes('not found') ||
     message.includes('no such') ||

@@ -35,7 +35,12 @@ export class ApiKeyGuard implements CanActivate {
       return true;
     }
 
-    const expected = this.config.get<string>('API_KEY');
+    // The real environment wins over @nestjs/config: a blank `API_KEY=` line
+    // in .env (the one .env.example ships) resolves to an empty string through
+    // ConfigService, which would drop this guard into its open dev mode and
+    // serve every endpoint unauthenticated.
+    const expected =
+      process.env.API_KEY || this.config.get<string>('API_KEY') || '';
 
     if (!expected) {
       if (!this.warned) {

@@ -21,6 +21,10 @@ const wwebMock = {
   getPoolStats: () => POOL_STATS,
   withClient: <T>(fn: (client: typeof clientMock) => Promise<T>) =>
     fn(clientMock),
+  expectOutgoingId: () => ({
+    promise: Promise.resolve(''),
+    cancel: () => undefined,
+  }),
   getQr: () => null,
   getQrPng: () => null,
   getLoggedInUserInfo: () => ({

@@ -22,6 +22,12 @@ function build(sendMessage: jest.Mock) {
   const wweb = {
     withClient: <T>(fn: (client: unknown) => Promise<T>) =>
       pool.run(() => fn({ sendMessage })),
+    // The real one waits for the message_create event; here the fake client
+    // already returns an id, so the waiter is always cancelled unused.
+    expectOutgoingId: () => ({
+      promise: Promise.resolve(''),
+      cancel: () => undefined,
+    }),
   } as unknown as WwebService;
 
   return new MessageOps(wweb, pool, config);

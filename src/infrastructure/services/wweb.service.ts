@@ -12,6 +12,12 @@ import * as path from 'path';
 import { ChatHistoryService } from './chat-history.service';
 import { WebhookService } from './webhook.service';
 import { ClientPool } from '../whatsapp/client-pool';
+import { serializeMessageId } from '../whatsapp/message-id.util';
+
+interface OutgoingWaiter {
+  body: string;
+  settle: (id: string) => void;
+}
 
 export type ConnectionStatus =
   | 'INITIALIZING'
@@ -31,6 +37,8 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
   private reconnectTimer: NodeJS.Timeout | null = null;
   /** `@lid` chats already looked up, so we hit puppeteer once per contact. */
   private resolvedLids = new Set<string>();
+  /** Callers waiting for the id of a message they just sent. */
+  private outgoingWaiters: OutgoingWaiter[] = [];
 
   constructor(
     private readonly chatHistory: ChatHistoryService,
@@ -96,7 +104,7 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
       const chatId = message.fromMe ? message.to : message.from;
 
       const stored = {
-        id: message.id?._serialized ?? `${Date.now()}`,
+        id: serializeMessageId(message.id) || `${Date.now()}`,
         chatId,
         from: message.from,
         to: message.to,
@@ -109,6 +117,10 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
 
       this.chatHistory.add(stored);
       this.linkLidAlias(chatId);
+
+      if (message.fromMe) {
+        this.resolveOutgoing(stored.body, stored.id);
+      }
 
       if (!message.fromMe) {
         this.logger.log(`📥 Message from ${message.from}: ${message.body}`);
@@ -151,13 +163,19 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
     if (this.reconnectTimer) {
       return;
     }
+    // Tear the old client down immediately instead of at reconnect time: after
+    // a disconnect whatsapp-web.js keeps injecting into the page it is losing,
+    // and those calls reject with "Attempted to use detached Frame" outside any
+    // promise chain we own — which used to kill the process. Dropping the
+    // listeners and destroying now closes that window.
+    const dying = this.client;
+    dying?.removeAllListeners();
+    void dying?.destroy().catch(() => undefined);
+
     this.logger.log('🔄 Reconnecting in 5s...');
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.client
-        ?.destroy()
-        .catch(() => undefined)
-        .finally(() => this.initClient());
+      this.initClient();
     }, 5000);
   }
 
@@ -226,6 +244,63 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
   async withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     this.assertReady();
     return this.pool.run(() => fn(this.client));
+  }
+
+  /**
+   * Claims the id of the next outgoing message whose body matches. Register it
+   * BEFORE sending: whatsapp-web.js returns undefined from sendMessage on
+   * current WhatsApp Web builds, so the `message_create` event is the only
+   * place the real id shows up.
+   *
+   * Two identical bodies sent at the same instant could swap ids; that is the
+   * accepted cost of matching on content, and it does not affect delivery.
+   */
+  expectOutgoingId(
+    body: string,
+    timeoutMs = 8000,
+  ): { promise: Promise<string>; cancel: () => void } {
+    let settle!: (id: string) => void;
+    const promise = new Promise<string>((resolve) => {
+      settle = resolve;
+    });
+
+    const waiter = { body, settle };
+    this.outgoingWaiters.push(waiter);
+
+    const timer = setTimeout(() => {
+      this.dropWaiter(waiter);
+      settle('');
+    }, timeoutMs);
+
+    const finish = () => {
+      clearTimeout(timer);
+      this.dropWaiter(waiter);
+    };
+
+    void promise.then(finish);
+
+    return {
+      promise,
+      cancel: () => {
+        finish();
+        settle('');
+      },
+    };
+  }
+
+  private resolveOutgoing(body: string, id: string): void {
+    const waiter = this.outgoingWaiters.find((w) => w.body === body);
+    if (waiter) {
+      this.dropWaiter(waiter);
+      waiter.settle(id);
+    }
+  }
+
+  private dropWaiter(waiter: OutgoingWaiter): void {
+    const index = this.outgoingWaiters.indexOf(waiter);
+    if (index >= 0) {
+      this.outgoingWaiters.splice(index, 1);
+    }
   }
 
   /** In-flight/queued operations, surfaced by the status endpoint. */

@@ -4,10 +4,41 @@ import { Logger } from '@nestjs/common';
  * Lightweight env validation run at boot (no Joi dependency).
  * Fails fast on clearly-wrong values; warns on weak-but-usable config.
  */
+/** Settings a real environment variable must always win over the .env file. */
+const SETTINGS = [
+  'PORT',
+  'API_KEY',
+  'WEBHOOK_URL',
+  'WEBHOOK_SECRET',
+  'WWEB_MAX_CONCURRENCY',
+  'WWEB_OP_TIMEOUT_MS',
+  'WWEB_BULK_MAX_RECIPIENTS',
+  'THROTTLE_TTL',
+  'THROTTLE_LIMIT',
+] as const;
+
+/**
+ * A blank line in `.env` (e.g. the `API_KEY=` that ships in .env.example)
+ * shadows the same variable exported in the real environment, so a deployment
+ * that sets API_KEY through pm2/docker while keeping that file would read an
+ * empty key — and the guard would fall back to its open dev mode, serving every
+ * endpoint unauthenticated. The environment wins.
+ */
+function preferProcessEnv(config: Record<string, unknown>): void {
+  for (const key of SETTINGS) {
+    const fromEnvironment = process.env[key];
+    if (fromEnvironment !== undefined && fromEnvironment !== '') {
+      config[key] = fromEnvironment;
+    }
+  }
+}
+
 export function validateEnv(
   config: Record<string, unknown>,
 ): Record<string, unknown> {
   const logger = new Logger('Config');
+
+  preferProcessEnv(config);
 
   const rawPort = (config.PORT as string | undefined) ?? '3000';
   const port = Number(rawPort);

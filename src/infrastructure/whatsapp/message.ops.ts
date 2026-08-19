@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Message } from 'whatsapp-web.js';
+import { Client, Message } from 'whatsapp-web.js';
 import { WwebService } from '../services/wweb.service';
 import { ClientPool, mapWithConcurrency } from './client-pool';
 import { resolveMedia, MediaSource } from './media.util';
@@ -10,6 +10,7 @@ import {
   WhatsappException,
 } from '../filters/whatsapp.exception';
 import { BulkItemResult, BulkResult, MessageSummary } from './wweb.types';
+import { serializeMessageId } from './message-id.util';
 
 /** Everything that acts on a message: sending, editing, deleting, reacting. */
 @Injectable()
@@ -29,14 +30,9 @@ export class MessageOps {
 
   async sendText(to: string, message: string): Promise<string> {
     const chatId = toChatId(to);
-    try {
-      return await this.wweb.withClient(async (client) => {
-        const sent = await client.sendMessage(chatId, message);
-        return sent.id?._serialized ?? '';
-      });
-    } catch (error) {
-      throw toWhatsappException(error, `Could not send message to ${chatId}`);
-    }
+    return this.sendAndResolveId(chatId, message, (client) =>
+      client.sendMessage(chatId, message),
+    );
   }
 
   async sendMedia(
@@ -45,16 +41,9 @@ export class MessageOps {
   ): Promise<string> {
     const chatId = toChatId(to);
     const media = await resolveMedia(source);
-    try {
-      return await this.wweb.withClient(async (client) => {
-        const sent = await client.sendMessage(chatId, media, {
-          caption: source.caption,
-        });
-        return sent.id?._serialized ?? '';
-      });
-    } catch (error) {
-      throw toWhatsappException(error, `Could not send media to ${chatId}`);
-    }
+    return this.sendAndResolveId(chatId, source.caption ?? '', (client) =>
+      client.sendMessage(chatId, media, { caption: source.caption }),
+    );
   }
 
   /**
@@ -67,16 +56,47 @@ export class MessageOps {
     quotedMessageId: string,
   ): Promise<string> {
     const chatId = toChatId(to);
+    return this.sendAndResolveId(chatId, message, (client) =>
+      client.sendMessage(chatId, message, { quotedMessageId }),
+    );
+  }
+
+  /**
+   * Sends and returns the message id.
+   *
+   * Current WhatsApp Web builds make whatsapp-web.js resolve sendMessage to
+   * undefined even though the message goes out, so when the returned model
+   * carries no id we fall back to the `message_create` event, which does. The
+   * waiter is registered before sending so a fast event cannot be missed.
+   */
+  private async sendAndResolveId(
+    chatId: string,
+    matchBody: string,
+    send: (client: Client) => Promise<Message | undefined>,
+  ): Promise<string> {
+    const waiter = this.wweb.expectOutgoingId(matchBody);
+
+    let sent: Message | undefined;
     try {
-      return await this.wweb.withClient(async (client) => {
-        const sent = await client.sendMessage(chatId, message, {
-          quotedMessageId,
-        });
-        return sent.id?._serialized ?? '';
-      });
+      sent = await this.wweb.withClient(send);
     } catch (error) {
-      throw toWhatsappException(error, `Could not reply in ${chatId}`);
+      waiter.cancel();
+      throw toWhatsappException(error, `Could not send message to ${chatId}`);
     }
+
+    const direct = serializeMessageId(sent?.id);
+    if (direct) {
+      waiter.cancel();
+      return direct;
+    }
+
+    const fromEvent = await waiter.promise;
+    if (!fromEvent) {
+      this.logger.warn(
+        `Message to ${chatId} was sent but WhatsApp returned no id for it`,
+      );
+    }
+    return fromEvent;
   }
 
   /**
@@ -208,10 +228,29 @@ export class MessageOps {
     try {
       await this.wweb.withClient(() => message.edit(content));
     } catch (error) {
+      // whatsapp-web.js dereferences the result of its injected editMessage
+      // helper, which current WhatsApp Web builds resolve to undefined even
+      // when the edit lands. Check the stored message before calling it a
+      // failure — otherwise a successful edit reports an error.
+      if (await this.bodyMatches(messageId, content)) {
+        return;
+      }
       throw toWhatsappException(
         error,
         'Could not edit message (only your own, within the time window WhatsApp allows)',
       );
+    }
+  }
+
+  private async bodyMatches(
+    messageId: string,
+    expected: string,
+  ): Promise<boolean> {
+    try {
+      const current = await this.fetch(messageId);
+      return current.body === expected;
+    } catch {
+      return false;
     }
   }
 
@@ -282,7 +321,7 @@ export class MessageOps {
     if (!message) {
       throw WhatsappException.notFound(`Message ${messageId}`);
     }
-    return message;
+    return hydrateId(message);
   }
 }
 
@@ -297,9 +336,30 @@ function dedupe<T extends { chatId: string }>(items: T[]): T[] {
   });
 }
 
+/**
+ * whatsapp-web.js sends `message.id._serialized` into the browser for delete,
+ * edit, star, pin, forward and react. Current WhatsApp Web builds do not set
+ * that property (the value arrives under a minified key), so the library
+ * shipped `undefined` into the page and every one of those calls failed with a
+ * minified error — react even reported success while doing nothing. Filling
+ * the property in makes the library work unmodified.
+ */
+function hydrateId(message: Message): Message {
+  const id = message.id as unknown as { _serialized?: string } | undefined;
+  if (!id) {
+    return message;
+  }
+
+  const serialized = serializeMessageId(message.id);
+  if (serialized && !id._serialized) {
+    id._serialized = serialized;
+  }
+  return message;
+}
+
 function toSummary(message: Message): MessageSummary {
   return {
-    id: message.id?._serialized ?? '',
+    id: serializeMessageId(message.id),
     chatId: message.fromMe ? message.to : message.from,
     from: message.from,
     to: message.to,
