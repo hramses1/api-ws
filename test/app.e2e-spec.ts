@@ -9,6 +9,9 @@ import { WwebService } from './../src/infrastructure/services/wweb.service';
 // The *Ops services reach the library only through withClient, so a fake
 // client here is enough to cover them.
 const clientMock = {
+  // The ops that WhatsApp Web broke run their own code inside the page;
+  // an empty result means "no failure" to all of them.
+  pupPage: { evaluate: () => Promise.resolve('') },
   sendMessage: () => Promise.resolve({ id: { _serialized: 'msg-id' } }),
   isRegisteredUser: () => Promise.resolve(true),
   getChats: () => Promise.resolve([]),

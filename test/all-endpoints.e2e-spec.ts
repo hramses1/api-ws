@@ -86,6 +86,9 @@ const groupMock = {
 };
 
 const clientMock = {
+  // The ops that WhatsApp Web broke run their own code inside the page;
+  // an empty result means "no failure" to all of them.
+  pupPage: { evaluate: () => Promise.resolve('') },
   sendMessage: () => Promise.resolve({ id: { _serialized: MESSAGE_ID } }),
   isRegisteredUser: () => Promise.resolve(true),
   getChats: () => Promise.resolve([groupMock]),

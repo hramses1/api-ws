@@ -106,18 +106,90 @@ export class GroupOps {
     groupId: string,
     changes: { subject?: string; description?: string },
   ): Promise<void> {
-    const group = await this.fetch(groupId);
+    if (changes.subject !== undefined) {
+      const group = await this.fetch(groupId);
+      try {
+        await this.wweb.withClient(() => group.setSubject(changes.subject!));
+      } catch (error) {
+        throw toWhatsappException(error, 'Could not update the group subject');
+      }
+    }
+
+    if (changes.description !== undefined) {
+      await this.setDescription(groupId, changes.description);
+    }
+  }
+
+  /**
+   * Set in-page rather than through the library: its implementation reads
+   * `chat.groupMetadata.descId` unguarded, and a group that never had a
+   * description has none, which blows up before the call is even made.
+   */
+  private async setDescription(
+    groupId: string,
+    description: string,
+  ): Promise<void> {
+    const chatId = toChatId(groupId, { allow: ['group'] });
+
     try {
-      await this.wweb.withClient(async () => {
-        if (changes.subject !== undefined) {
-          await group.setSubject(changes.subject);
-        }
-        if (changes.description !== undefined) {
-          await group.setDescription(changes.description);
-        }
-      });
+      const failure = await this.inPage(
+        (payload: string) => {
+          const { id, description: text } = JSON.parse(payload) as {
+            id: string;
+            description: string;
+          };
+          const scope = window as unknown as {
+            require: (m: string) => Record<string, unknown>;
+            WWebJS: { getChat: (id: string, o: unknown) => Promise<unknown> };
+          };
+
+          const factory = scope.require('WAWebWidFactory') as {
+            createWid: (v: string) => unknown;
+          };
+          const wid = factory.createWid(id);
+
+          return Promise.resolve(
+            scope.WWebJS.getChat(id, { getAsModel: false }),
+          )
+            .then(async (chat) => {
+              const metadata = (chat as { groupMetadata?: { descId?: string } })
+                ?.groupMetadata;
+              const keys = scope.require('WAWebMsgKey') as {
+                newId: () => Promise<string> | string;
+              };
+              const newId = await keys.newId();
+              // Current builds take a single options object; whatsapp-web.js
+              // still calls it with four positional arguments, which is why its
+              // own setDescription fails reading `.toJid()` of undefined.
+              const job = scope.require('WAWebGroupModifyInfoJob') as {
+                setGroupDescription: (options: {
+                  groupWid: unknown;
+                  description: string;
+                  descId: unknown;
+                  prevDescId?: string;
+                }) => Promise<unknown>;
+              };
+              await job.setGroupDescription({
+                groupWid: wid,
+                description: text,
+                descId: newId,
+                prevDescId: metadata?.descId,
+              });
+              return '';
+            })
+            .catch((err: Error) => String(err?.message ?? err) || 'unknown');
+        },
+        JSON.stringify({ id: chatId, description }),
+      );
+
+      if (failure) {
+        throw new Error(failure);
+      }
     } catch (error) {
-      throw toWhatsappException(error, 'Could not update group info');
+      throw toWhatsappException(
+        error,
+        'Could not update the group description',
+      );
     }
   }
 
@@ -182,28 +254,98 @@ export class GroupOps {
     await this.changeParticipants(groupId, participants, 'demote');
   }
 
+  /**
+   * Promote, demote or remove participants.
+   *
+   * Not delegated to the library: it resolves each participant through its own
+   * lid/phone lookup, which comes back empty on current builds — group members
+   * are keyed by `@lid` while callers pass phone numbers — so it ends up asking
+   * WhatsApp to act on an empty list. Matching against the group's own roster
+   * (by lid or by phone) is what makes this work.
+   */
   private async changeParticipants(
     groupId: string,
     participants: string[],
     action: 'remove' | 'promote' | 'demote',
   ): Promise<void> {
-    const group = await this.fetch(groupId);
-    const ids = participants.map((p) =>
+    const chatId = toChatId(groupId, { allow: ['group'] });
+    const wanted = participants.map((p) =>
       toChatId(p, { allow: ['user', 'lid'] }),
     );
 
-    try {
-      await this.wweb.withClient(() => {
-        if (action === 'remove') {
-          return group.removeParticipants(ids);
-        }
-        if (action === 'promote') {
-          return group.promoteParticipants(ids);
-        }
-        return group.demoteParticipants(ids);
-      });
-    } catch (error) {
-      throw toWhatsappException(error, `Could not ${action} participants`);
+    const outcome = await this.inPage(
+      (payload: string) => {
+        const { id, ids, method } = JSON.parse(payload) as {
+          id: string;
+          ids: string[];
+          method: string;
+        };
+
+        const scope = window as unknown as {
+          require: (m: string) => Record<string, unknown>;
+          WWebJS: { getChat: (i: string, o: unknown) => Promise<unknown> };
+        };
+
+        return Promise.resolve(scope.WWebJS.getChat(id, { getAsModel: false }))
+          .then(async (chat) => {
+            const roster = (
+              chat as {
+                groupMetadata?: {
+                  participants?: {
+                    getModelsArray?: () => Array<Record<string, unknown>>;
+                  };
+                };
+              }
+            )?.groupMetadata?.participants;
+
+            const models = roster?.getModelsArray?.() ?? [];
+            const migration = scope.require('WAWebLidMigrationUtils') as {
+              toPn?: (wid: unknown) => { _serialized?: string } | undefined;
+            };
+
+            const targets = models.filter((model) => {
+              const wid = model.id as { _serialized?: string } | undefined;
+              const serialized = wid?._serialized;
+              const phone = migration.toPn?.(wid)?._serialized;
+              return (
+                (serialized !== undefined && ids.includes(serialized)) ||
+                (phone !== undefined && ids.includes(phone))
+              );
+            });
+
+            if (targets.length === 0) {
+              return 'NOT_IN_GROUP';
+            }
+
+            const actions = scope.require(
+              'WAWebModifyParticipantsGroupAction',
+            ) as Record<
+              string,
+              (chat: unknown, targets: unknown[]) => Promise<unknown>
+            >;
+
+            await actions[method](chat, targets);
+            return '';
+          })
+          .catch((err: Error) => String(err?.message ?? err) || 'unknown');
+      },
+      JSON.stringify({
+        id: chatId,
+        ids: wanted,
+        method: `${action}Participants`,
+      }),
+    );
+
+    if (outcome === 'NOT_IN_GROUP') {
+      throw WhatsappException.notFound(
+        `None of those participants belong to ${chatId}`,
+      );
+    }
+    if (outcome) {
+      throw toWhatsappException(
+        new Error(outcome),
+        `Could not ${action} participants`,
+      );
     }
   }
 
@@ -244,15 +386,38 @@ export class GroupOps {
     }
   }
 
-  /** Invalidates the current invite code and returns the fresh one. */
+  /**
+   * Invalidates the current invite code and returns the fresh one.
+   *
+   * Not delegated to the library: it looks resetGroupInviteCode up on
+   * WAWebGroupQueryJob, while the function lives on WAWebGroupInviteJob, so its
+   * own call fails with an undefined-is-not-a-function error.
+   */
   async revokeInvite(groupId: string): Promise<GroupInvite> {
-    const group = await this.fetch(groupId);
+    const chatId = toChatId(groupId, { allow: ['group'] });
+
     try {
-      await this.wweb.withClient(() => group.revokeInvite());
+      const code = await this.inPage((id: string) => {
+        const scope = window as unknown as {
+          require: (m: string) => {
+            createWid?: (v: string) => unknown;
+            resetGroupInviteCode?: (wid: unknown) => Promise<{ code?: string }>;
+          };
+        };
+        const wid = scope.require('WAWebWidFactory').createWid?.(id);
+        const job = scope.require('WAWebGroupInviteJob');
+        return Promise.resolve(job.resetGroupInviteCode?.(wid)).then(
+          (res) => res?.code ?? '',
+        );
+      }, chatId);
+
+      if (!code) {
+        return this.getInvite(chatId);
+      }
+      return { code, url: `${INVITE_BASE_URL}${code}` };
     } catch (error) {
       throw toWhatsappException(error, 'Could not revoke the invite code');
     }
-    return this.getInvite(groupId);
   }
 
   async join(inviteCode: string): Promise<{ groupId: string }> {
@@ -384,6 +549,23 @@ export class GroupOps {
       throw WhatsappException.notFound(`Group ${chatId}`);
     }
     return chat as GroupChat;
+  }
+
+  /**
+   * Runs code inside the WhatsApp Web page. Needed where whatsapp-web.js calls
+   * an internal module that moved or disappeared in the current build.
+   */
+  private async inPage<T>(
+    fn: (payload: string) => T | Promise<T>,
+    payload: string,
+  ): Promise<T> {
+    return this.wweb.withClient(async (client) => {
+      const page = (client as unknown as { pupPage?: PageLike }).pupPage;
+      if (!page) {
+        throw WhatsappException.unavailable('Browser page not available');
+      }
+      return page.evaluate(fn, payload);
+    });
   }
 
   /**

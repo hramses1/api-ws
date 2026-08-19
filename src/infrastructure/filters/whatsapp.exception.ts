@@ -73,6 +73,14 @@ export function toWhatsappException(
     );
   }
 
+  // WhatsApp's own refusal, e.g. promoting the group owner or acting on a
+  // member who is already in that role. Nothing the caller can retry.
+  if (message.includes('could not perform action')) {
+    return WhatsappException.conflict(
+      `${context}: WhatsApp refused the action. Check the target is a member and not already in that role (the owner cannot be promoted or demoted).`,
+    );
+  }
+
   if (
     message.includes('already') ||
     message.includes('revoked') ||
