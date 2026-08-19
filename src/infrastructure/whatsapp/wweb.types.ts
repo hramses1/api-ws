@@ -65,7 +65,13 @@ export interface MembershipRequestSummary {
 
 export interface ParticipantActionResult {
   id: string;
-  status: 'ok' | 'failed';
+  /**
+   * 'invited' means WhatsApp refused to add the person directly — their privacy
+   * settings restrict who may add them to groups — and returned an invite link
+   * to send them instead.
+   */
+  status: 'ok' | 'invited' | 'failed';
   code?: number;
   message?: string;
+  inviteUrl?: string;
 }

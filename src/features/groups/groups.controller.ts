@@ -8,10 +8,12 @@ import {
   Patch,
   Post,
   Put,
+  Query,
 } from '@nestjs/common';
 import {
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiSecurity,
   ApiTags,
@@ -244,11 +246,31 @@ export class GroupsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Leave the group' })
+  @ApiOperation({
+    summary: 'Leave the group',
+    description:
+      'Pass deleteChat=true to also remove the conversation from your chat list. Leaving on its own only removes you as a member; WhatsApp keeps the chat.',
+  })
   @ApiParam(GROUP_ID_PARAM)
+  @ApiQuery({ name: 'deleteChat', required: false, example: false })
   @ApiResponse({ status: 200, type: GroupOkResponse })
-  async leave(@Param('id') id: string): Promise<GroupOkResponse> {
-    await this.groups.leave(id);
+  async leave(
+    @Param('id') id: string,
+    @Query('deleteChat') deleteChat?: string,
+  ): Promise<GroupOkResponse> {
+    // A group we already left cannot be left again; deleting must still work.
+    try {
+      await this.groups.leave(id);
+    } catch (error) {
+      if (deleteChat !== 'true') {
+        throw error;
+      }
+    }
+
+    if (deleteChat === 'true') {
+      const deleted = await this.groups.deleteChat(id);
+      return { ok: deleted };
+    }
     return { ok: true };
   }
 }

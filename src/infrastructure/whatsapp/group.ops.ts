@@ -18,6 +18,17 @@ import { serializeWid } from './message-id.util';
 
 const INVITE_BASE_URL = 'https://chat.whatsapp.com/';
 
+/** What WhatsApp answers to an add-participants request. */
+interface AddParticipantsPayload {
+  status?: number;
+  participants?: Array<{
+    userWid?: unknown;
+    username?: string | null;
+    code?: string | number;
+    invite_code?: string;
+  }>;
+}
+
 /**
  * The runtime class behind the GroupChat interface. The package exports the
  * class but only publishes the interface in its typings, hence the require.
@@ -90,9 +101,7 @@ export class GroupOps {
     return {
       ...toSummary(group),
       owner: serializeWid(group.owner) || null,
-      createdAt: group.createdAt
-        ? new Date(group.createdAt).toISOString()
-        : null,
+      createdAt: toIsoDate(group.createdAt),
       description: group.description ?? '',
       participants: (group.participants ?? []).map((participant) => ({
         id: serializeWid(participant.id),
@@ -197,40 +206,147 @@ export class GroupOps {
    * Adding participants reports per-participant outcomes (a contact may block
    * being added to groups), so a partial success is still a success.
    */
+  /**
+   * Adds participants.
+   *
+   * Not delegated to the library: it resolves each number through WhatsApp's
+   * contact store first, and for a number that is not in the address book that
+   * path dies with "this.findImpl is not a function". Handing the group action
+   * plain Wids skips the lookup entirely.
+   */
   async addParticipants(
     groupId: string,
     participants: string[],
   ): Promise<ParticipantActionResult[]> {
-    const group = await this.fetch(groupId);
-    const ids = participants.map((p) =>
+    const chatId = toChatId(groupId, { allow: ['group'] });
+    const wanted = participants.map((p) =>
       toChatId(p, { allow: ['user', 'lid'] }),
     );
 
-    try {
-      const result = await this.wweb.withClient(() =>
-        group.addParticipants(ids),
-      );
+    const raw = await this.inPage(
+      (payload: string) => {
+        const { id, ids } = JSON.parse(payload) as {
+          id: string;
+          ids: string[];
+        };
+        const scope = window as unknown as {
+          require: (m: string) => Record<string, unknown>;
+          WWebJS: { getChat: (i: string, o: unknown) => Promise<unknown> };
+        };
 
-      if (typeof result === 'string') {
-        throw WhatsappException.conflict(result);
+        const factory = scope.require('WAWebWidFactory') as {
+          createWid: (v: string) => unknown;
+        };
+        const wids = ids.map((value) => factory.createWid(value));
+
+        return Promise.resolve(scope.WWebJS.getChat(id, { getAsModel: false }))
+          .then(async (chat) => {
+            const action = scope.require(
+              'WAWebModifyParticipantsGroupAction',
+            ) as {
+              addParticipants: (
+                chat: unknown,
+                targets: unknown[],
+              ) => Promise<unknown>;
+            };
+            const collections = scope.require('WAWebCollections') as {
+              Contact?: {
+                get: (w: unknown) => unknown;
+                find?: (w: unknown) => Promise<unknown>;
+              };
+            };
+            const contacts = await Promise.all(
+              wids.map(async (w) => {
+                const cached = collections.Contact?.get(w);
+                if (cached) return cached;
+                try {
+                  return (await collections.Contact?.find?.(w)) ?? undefined;
+                } catch {
+                  return undefined;
+                }
+              }),
+            );
+
+            const targets = contacts.filter(Boolean);
+            if (targets.length === 0) {
+              return JSON.stringify({
+                ok: false,
+                error: 'WhatsApp does not know those numbers',
+              });
+            }
+
+            try {
+              const result = await action.addParticipants(chat, targets);
+              return JSON.stringify({ ok: true, result });
+            } catch (err) {
+              return JSON.stringify({
+                ok: false,
+                error: String((err as Error)?.message).slice(0, 200),
+              });
+            }
+          })
+          .catch((err: Error) =>
+            JSON.stringify({
+              ok: false,
+              error: String(err?.message ?? err).slice(0, 200),
+            }),
+          );
+      },
+      JSON.stringify({ id: chatId, ids: wanted }),
+    );
+
+    // Same convention as the other in-page operations: nothing back means
+    // nothing went wrong.
+    const outcome = raw
+      ? (JSON.parse(raw) as {
+          ok: boolean;
+          error?: string;
+          result?: AddParticipantsPayload;
+        })
+      : { ok: true, result: undefined };
+
+    if (!outcome.ok) {
+      throw toWhatsappException(
+        new Error(outcome.error ?? 'unknown'),
+        'Could not add participants',
+      );
+    }
+
+    const entries = outcome.result?.participants ?? [];
+    if (entries.length === 0) {
+      return wanted.map((id) => ({ id, status: 'ok' as const }));
+    }
+
+    return entries.map((entry) => {
+      const code = Number(entry.code ?? 0);
+      const id =
+        serializeWid(entry.userWid) ||
+        (typeof entry.userWid === 'string' ? entry.userWid : '');
+
+      if (code === 200 || code === 0) {
+        return { id, status: 'ok' as const, code };
       }
 
-      // The published typings wrap the per-participant record one level deeper
-      // than the runtime value, so read it through a flat shape.
-      const byParticipant = result as unknown as Record<
-        string,
-        { code?: number; message?: string }
-      >;
+      // 403 with an invite code: the person restricts who can add them, so
+      // WhatsApp hands back a link to send them instead of adding them.
+      if (entry.invite_code) {
+        return {
+          id,
+          status: 'invited' as const,
+          code,
+          message:
+            'Their privacy settings do not allow being added directly. Send them the invite link.',
+          inviteUrl: `${INVITE_BASE_URL}${entry.invite_code.replace(/^\//, '')}`,
+        };
+      }
 
-      return Object.entries(byParticipant).map(([id, value]) => ({
+      return {
         id,
-        status: value.code === 200 ? ('ok' as const) : ('failed' as const),
-        code: value.code,
-        message: value.message,
-      }));
-    } catch (error) {
-      throw toWhatsappException(error, 'Could not add participants');
-    }
+        status: 'failed' as const,
+        code,
+        message: entry.username ?? undefined,
+      };
+    });
   }
 
   async removeParticipants(
@@ -516,6 +632,25 @@ export class GroupOps {
     }
   }
 
+  /**
+   * Deletes the conversation itself. Leaving a group only removes you from it;
+   * the chat stays in the list until it is deleted, which is a separate action.
+   */
+  async deleteChat(groupId: string): Promise<boolean> {
+    const chatId = toChatId(groupId, { allow: ['group'] });
+
+    try {
+      return await this.inPage((id: string) => {
+        const scope = window as unknown as {
+          WWebJS: { sendDeleteChat: (i: string) => Promise<boolean> };
+        };
+        return scope.WWebJS.sendDeleteChat(id);
+      }, chatId);
+    } catch (error) {
+      throw toWhatsappException(error, `Could not delete the chat ${chatId}`);
+    }
+  }
+
   async leave(groupId: string): Promise<void> {
     const group = await this.fetch(groupId);
     try {
@@ -626,11 +761,24 @@ function toSummary(chat: Chat): GroupSummary {
   const group = chat as GroupChat;
   return {
     id: serializeWid(chat.id),
-    name: chat.name,
+    name: chat.name ?? '',
     participantCount: group.participants?.length ?? 0,
-    isReadOnly: chat.isReadOnly,
-    unreadCount: chat.unreadCount,
+    isReadOnly: chat.isReadOnly ?? false,
+    unreadCount: chat.unreadCount ?? 0,
   };
+}
+
+/**
+ * A group we already left comes back without a usable creation date, and
+ * `new Date(undefined).toISOString()` throws "Invalid time value" — which used
+ * to surface as a 500 on an otherwise fine request.
+ */
+function toIsoDate(value: unknown): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const date = new Date(value as string | number | Date);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 /** Membership request ids come back as raw wid objects. */

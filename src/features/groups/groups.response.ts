@@ -4,14 +4,25 @@ export class ParticipantActionResponse {
   @ApiProperty({ example: '573001111111@c.us' })
   id: string;
 
-  @ApiProperty({ example: 'ok', enum: ['ok', 'failed'] })
-  status: 'ok' | 'failed';
+  @ApiProperty({
+    example: 'ok',
+    enum: ['ok', 'invited', 'failed'],
+    description:
+      "'invited' means WhatsApp would not add them directly (their privacy settings restrict it) and returned an invite link instead.",
+  })
+  status: 'ok' | 'invited' | 'failed';
 
   @ApiPropertyOptional({ example: 200 })
   code?: number;
 
   @ApiPropertyOptional({ example: 'Participant added' })
   message?: string;
+
+  @ApiPropertyOptional({
+    example: 'https://chat.whatsapp.com/uZgvaB1rPZjdvsA',
+    description: 'Link to send the person when status is "invited".',
+  })
+  inviteUrl?: string;
 }
 
 export class GroupSummaryResponse {
