@@ -52,6 +52,8 @@ Session persists in `.wwebjs_auth/` — no rescan needed on later starts.
 | `WWEB_MAX_CONCURRENCY` | `5` | How many operations hit the browser at once. Drives bulk parallelism; too high saturates Chrome. |
 | `WWEB_OP_TIMEOUT_MS` | `30000` | Per-operation timeout; a slower call returns 504 instead of hanging. |
 | `WWEB_BULK_MAX_RECIPIENTS` | `50` | Hard cap on recipients per bulk call. |
+| `THROTTLE_TTL` | `60000` | Rate-limit window in ms. |
+| `THROTTLE_LIMIT` | `30` | Requests per window per IP. |
 
 ## Endpoints
 
@@ -209,7 +211,8 @@ npm run test:e2e  # e2e (WhatsApp client is mocked)
   WhatsApp allows (group admins may also revoke others'); otherwise → 409.
 - `GET /whatsapp/status` reports the concurrency pool (`inFlight`, `queued`,
   `limit`) — useful when bulk sends feel slow.
-- Rate limit: 30 requests / 60s per IP (avoids WhatsApp bans).
+- Rate limit: 30 requests / 60s per IP by default (avoids WhatsApp bans),
+  configurable with `THROTTLE_LIMIT`/`THROTTLE_TTL`.
 - Auto-reconnects 5s after an unexpected disconnect (LocalAuth keeps session).
 - Use `npm run start`, not `start:dev`: watch-mode restarts relaunch Chrome and
   can trigger WhatsApp's "can't link new devices" rate limit.

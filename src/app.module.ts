@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { InfrastructureModule } from './infrastructure/infrastructure.module';
@@ -17,9 +17,17 @@ import { LogoutModule } from './features/logout/logout.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
-    // Global rate limit: 30 requests / 60s per IP. Avoids spamming WhatsApp
-    // (which leads to bans).
-    ThrottlerModule.forRoot([{ ttl: 60000, limit: 30 }]),
+    // Global rate limit, 30 requests / 60s per IP by default. Avoids spamming
+    // WhatsApp (which leads to bans); tune with THROTTLE_TTL/THROTTLE_LIMIT.
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => [
+        {
+          ttl: Number(config.get('THROTTLE_TTL') ?? 60000),
+          limit: Number(config.get('THROTTLE_LIMIT') ?? 30),
+        },
+      ],
+    }),
     InfrastructureModule,
     MessagesModule,
     GroupsModule,

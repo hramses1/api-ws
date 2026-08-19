@@ -28,6 +28,8 @@ export function validateEnv(
   requireIntegerInRange(config, 'WWEB_MAX_CONCURRENCY', 5, 1, 20);
   requireIntegerInRange(config, 'WWEB_OP_TIMEOUT_MS', 30000, 1000, 120000);
   requireIntegerInRange(config, 'WWEB_BULK_MAX_RECIPIENTS', 50, 1, 100);
+  requireIntegerInRange(config, 'THROTTLE_TTL', 60000, 1000, 600000);
+  requireIntegerInRange(config, 'THROTTLE_LIMIT', 30, 1, 10000);
 
   return config;
 }
