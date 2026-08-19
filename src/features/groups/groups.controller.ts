@@ -60,7 +60,11 @@ export class GroupsController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List the groups you belong to' })
+  @ApiOperation({
+    summary: 'List the groups you belong to',
+    description:
+      'A group you just left or deleted can linger here for a while, with an empty name and no participants: WhatsApp Web keeps the entry in its own chat collection until it prunes it. The conversation is already gone from the phone.',
+  })
   @ApiResponse({ status: 200, type: [GroupSummaryResponse] })
   list(): Promise<GroupSummaryResponse[]> {
     return this.groups.list();

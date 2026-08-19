@@ -102,7 +102,7 @@ Base path: `/api/whatsapp` (health at `/api/health`). Swagger UI:
 | POST   | `/whatsapp/groups/join`                            | Join with an invite code       |
 | GET    | `/whatsapp/groups/:id`                             | Detail + participants          |
 | PATCH  | `/whatsapp/groups/:id`                             | Change subject / description   |
-| DELETE | `/whatsapp/groups/:id`                             | Leave the group                |
+| DELETE | `/whatsapp/groups/:id`                             | Leave the group (`?deleteChat=true` also removes the conversation) |
 | POST   | `/whatsapp/groups/:id/participants`                | Add participants               |
 | DELETE | `/whatsapp/groups/:id/participants`                | Remove participants            |
 | POST   | `/whatsapp/groups/:id/participants/promote`        | Promote to admin               |
@@ -182,6 +182,20 @@ number never aborts the batch:
   ]
 }
 ```
+
+### Group quirks worth knowing
+
+- **Adding someone may return `invited` instead of `ok`.** If their privacy
+  settings restrict who can add them to groups, WhatsApp refuses the direct add
+  and hands back an invite link, which the response carries as `inviteUrl`.
+  Send them that link — there is no way around it from the API.
+- **Leaving does not delete the conversation.** Pass `?deleteChat=true` to
+  `DELETE /groups/:id` to remove it as well.
+- **A deleted group can still appear in `GET /groups`** for a while, with an
+  empty name and no participants: WhatsApp Web keeps the entry in its local
+  chat collection after the conversation is gone from the phone.
+- **Creating groups is rate-limited.** A burst of creations starts failing with
+  `CreateGroupError`; waiting a minute clears it.
 
 > **Ban risk:** WhatsApp blocks numbers that send many simultaneous messages to
 > people who never wrote first. Batches stay capped at
