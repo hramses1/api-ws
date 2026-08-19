@@ -108,7 +108,7 @@ const clientMock = {
 };
 
 const wwebMock = {
-  getStatus: () => ({ status: 'READY', qrAvailable: false }),
+  getStatus: () => ({ status: 'READY', qrAvailable: false, webVersion: null }),
   getPoolStats: () => ({ inFlight: 0, queued: 0, limit: 5 }),
   withClient: <T>(fn: (client: typeof clientMock) => Promise<T>) =>
     fn(clientMock),

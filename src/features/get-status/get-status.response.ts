@@ -39,6 +39,14 @@ export class GetStatusResponse {
   qrAvailable: boolean;
 
   @ApiProperty({
+    example: '2.3000.1045513958',
+    nullable: true,
+    description:
+      'WhatsApp Web build in use. First thing to check when the library starts failing.',
+  })
+  webVersion: string | null;
+
+  @ApiProperty({
     type: PoolStatsResponse,
     description:
       'Concurrency pool usage, useful when diagnosing slow bulk sends',

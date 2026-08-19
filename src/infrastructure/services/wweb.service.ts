@@ -14,6 +14,26 @@ import { WebhookService } from './webhook.service';
 import { ClientPool } from '../whatsapp/client-pool';
 import { serializeMessageId } from '../whatsapp/message-id.util';
 
+/**
+ * whatsapp-web.js defaults to whatever build WhatsApp serves, and a new build
+ * regularly breaks its injected helpers. Setting WWEB_WEB_VERSION pins a known
+ * snapshot from the public wa-version mirror instead.
+ */
+function pinnedWebVersion(): Record<string, unknown> {
+  const version = process.env.WWEB_WEB_VERSION;
+  if (!version) {
+    return {};
+  }
+
+  return {
+    webVersion: version,
+    webVersionCache: {
+      type: 'remote',
+      remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${version}.html`,
+    },
+  };
+}
+
 interface OutgoingWaiter {
   body: string;
   settle: (id: string) => void;
@@ -39,6 +59,8 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
   private resolvedLids = new Set<string>();
   /** Callers waiting for the id of a message they just sent. */
   private outgoingWaiters: OutgoingWaiter[] = [];
+  /** WhatsApp Web build currently loaded, read once the client is ready. */
+  private webVersion: string | null = null;
 
   constructor(
     private readonly chatHistory: ChatHistoryService,
@@ -59,6 +81,7 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
       puppeteer: {
         args: ['--no-sandbox'],
       },
+      ...pinnedWebVersion(),
     });
 
     this.registerEvents();
@@ -86,6 +109,16 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
       this.status = 'READY';
       this.clearQr();
       this.logger.log('✅ WhatsApp client is ready');
+
+      // Recorded once: when whatsapp-web.js breaks it is almost always because
+      // WhatsApp shipped a new web build, and this is the first thing to check.
+      this.client
+        .getWWebVersion()
+        .then((version) => {
+          this.webVersion = version;
+          this.logger.log(`🌐 WhatsApp Web version: ${version}`);
+        })
+        .catch(() => undefined);
     });
 
     this.client.on('auth_failure', () => {
@@ -215,8 +248,16 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  getStatus(): { status: ConnectionStatus; qrAvailable: boolean } {
-    return { status: this.status, qrAvailable: this.lastQr !== null };
+  getStatus(): {
+    status: ConnectionStatus;
+    qrAvailable: boolean;
+    webVersion: string | null;
+  } {
+    return {
+      status: this.status,
+      qrAvailable: this.lastQr !== null,
+      webVersion: this.webVersion,
+    };
   }
 
   getQr(): string | null {

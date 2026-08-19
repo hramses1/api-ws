@@ -17,7 +17,7 @@ const clientMock = {
 const POOL_STATS = { inFlight: 0, queued: 0, limit: 5 };
 
 const wwebMock = {
-  getStatus: () => ({ status: 'READY', qrAvailable: false }),
+  getStatus: () => ({ status: 'READY', qrAvailable: false, webVersion: null }),
   getPoolStats: () => POOL_STATS,
   withClient: <T>(fn: (client: typeof clientMock) => Promise<T>) =>
     fn(clientMock),
@@ -63,7 +63,12 @@ describe('WhatsApp API (e2e)', () => {
       request(app.getHttpServer())
         .get('/api/whatsapp/status')
         .expect(200)
-        .expect({ status: 'READY', qrAvailable: false, pool: POOL_STATS }));
+        .expect({
+          status: 'READY',
+          qrAvailable: false,
+          webVersion: null,
+          pool: POOL_STATS,
+        }));
 
     it('GET /api/health → 200 (public)', () =>
       request(app.getHttpServer())
