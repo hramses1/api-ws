@@ -59,3 +59,14 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 .wwebjs_cache
 tmp/*
 !tmp/.gitkeep
+
+# Local agent/skill tooling (not part of the app)
+.claude/
+.agents/
+skills-lock.json
+
+# pm2 logs
+logs/
+
+# Design specs (local only)
+docs/
