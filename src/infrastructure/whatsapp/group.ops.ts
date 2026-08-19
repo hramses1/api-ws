@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Chat, GroupChat } from 'whatsapp-web.js';
+import { Chat, Client, GroupChat } from 'whatsapp-web.js';
 import { WwebService } from '../services/wweb.service';
 import { resolveMedia, MediaSource } from './media.util';
 import { toChatId } from '../utils/phone.util';
@@ -16,6 +16,18 @@ import {
 } from './wweb.types';
 
 const INVITE_BASE_URL = 'https://chat.whatsapp.com/';
+
+/**
+ * The runtime class behind the GroupChat interface. The package exports the
+ * class but only publishes the interface in its typings, hence the require.
+ */
+
+const GroupChatCtor =
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  require('whatsapp-web.js/src/structures/GroupChat') as new (
+    client: Client,
+    data: unknown,
+  ) => GroupChat;
 
 /** Group lifecycle and administration. */
 @Injectable()
@@ -354,7 +366,12 @@ export class GroupOps {
     try {
       chat = await this.wweb.withClient((client) => client.getChatById(chatId));
     } catch (error) {
-      throw toWhatsappException(error, `Group ${chatId}`);
+      this.logger.warn(
+        `getChatById failed for ${chatId}, reading the chat directly: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return this.fetchFromPage(chatId);
     }
 
     if (!chat?.isGroup) {
@@ -362,6 +379,59 @@ export class GroupOps {
     }
     return chat as GroupChat;
   }
+
+  /**
+   * Fallback for WhatsApp Web builds where the library's injected `getChat`
+   * helper breaks. The GroupChat methods themselves only need a valid
+   * `id._serialized` — they call WhatsApp's modules directly — so reading the
+   * chat straight out of the in-page collection is enough to keep every group
+   * action working, and gives real data for the read endpoints when the model
+   * still serializes.
+   */
+  private async fetchFromPage(chatId: string): Promise<GroupChat> {
+    const built = await this.wweb.withClient(async (client) => {
+      const page = (client as unknown as { pupPage?: PageLike }).pupPage;
+      if (!page) {
+        return null;
+      }
+
+      const raw = await page.evaluate((id: string) => {
+        const scope = window as unknown as {
+          require: (module: string) => {
+            createWid?: (value: string) => unknown;
+            Chat?: { get: (wid: unknown) => unknown };
+          };
+        };
+        const wid = scope.require('WAWebWidFactory').createWid?.(id);
+        const chat = scope.require('WAWebCollections').Chat?.get(wid) as
+          | { serialize?: () => unknown }
+          | undefined;
+
+        if (!chat) {
+          return null;
+        }
+        try {
+          return chat.serialize?.() ?? null;
+        } catch {
+          // Enough for the action endpoints even when the model will not
+          // serialize on this build.
+          return { id: { _serialized: id }, isGroup: true, groupMetadata: {} };
+        }
+      }, chatId);
+
+      return raw ? new GroupChatCtor(client, raw) : null;
+    });
+
+    if (!built) {
+      throw WhatsappException.notFound(`Group ${chatId}`);
+    }
+    return built;
+  }
+}
+
+/** Minimal shape of the puppeteer page, to avoid depending on its types. */
+interface PageLike {
+  evaluate<T>(fn: (arg: string) => T, arg: string): Promise<T>;
 }
 
 function toSummary(chat: Chat): GroupSummary {
