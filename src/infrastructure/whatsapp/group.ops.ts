@@ -14,6 +14,7 @@ import {
   MembershipRequestSummary,
   ParticipantActionResult,
 } from './wweb.types';
+import { serializeWid } from './message-id.util';
 
 const INVITE_BASE_URL = 'https://chat.whatsapp.com/';
 
@@ -59,7 +60,7 @@ export class GroupOps {
       }
 
       return {
-        groupId: result.gid?._serialized ?? '',
+        groupId: serializeWid(result.gid),
         title: result.title,
         participants: Object.entries(result.participants ?? {}).map(
           ([id, value]) => ({
@@ -88,13 +89,13 @@ export class GroupOps {
     const group = await this.fetch(groupId);
     return {
       ...toSummary(group),
-      owner: group.owner?._serialized ?? null,
+      owner: serializeWid(group.owner) || null,
       createdAt: group.createdAt
         ? new Date(group.createdAt).toISOString()
         : null,
       description: group.description ?? '',
       participants: (group.participants ?? []).map((participant) => ({
-        id: participant.id?._serialized ?? '',
+        id: serializeWid(participant.id),
         isAdmin: participant.isAdmin,
         isSuperAdmin: participant.isSuperAdmin,
       })),
@@ -262,7 +263,12 @@ export class GroupOps {
       );
       return { groupId };
     } catch (error) {
-      throw toWhatsappException(error, 'Could not join the group');
+      // The library surfaces a minified error here whatever went wrong, and in
+      // practice the code is either wrong, expired or already used.
+      throw toWhatsappException(
+        error,
+        `Could not join with invite code "${code}" (wrong, expired or already used)`,
+      );
     }
   }
 
@@ -437,7 +443,7 @@ interface PageLike {
 function toSummary(chat: Chat): GroupSummary {
   const group = chat as GroupChat;
   return {
-    id: chat.id?._serialized ?? '',
+    id: serializeWid(chat.id),
     name: chat.name,
     participantCount: group.participants?.length ?? 0,
     isReadOnly: chat.isReadOnly,

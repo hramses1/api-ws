@@ -34,6 +34,11 @@ function pinnedWebVersion(): Record<string, unknown> {
   };
 }
 
+/** Minimal shape of the puppeteer page, to avoid depending on its types. */
+interface PageLike {
+  evaluate<T>(fn: () => T): Promise<T>;
+}
+
 interface OutgoingWaiter {
   body: string;
   settle: (id: string) => void;
@@ -109,6 +114,8 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
       this.status = 'READY';
       this.clearQr();
       this.logger.log('✅ WhatsApp client is ready');
+
+      void this.patchSerializedIds();
 
       // Recorded once: when whatsapp-web.js breaks it is almost always because
       // WhatsApp shipped a new web build, and this is the first thing to check.
@@ -285,6 +292,102 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
   async withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     this.assertReady();
     return this.pool.run(() => fn(this.client));
+  }
+
+  /**
+   * Restores `_serialized` on WhatsApp's Wid and message-key objects.
+   *
+   * Current WhatsApp Web builds dropped that property (the value lives under a
+   * minified key), and whatsapp-web.js reads it everywhere — most damagingly in
+   * getChatModel, which feeds the undefined value to an IndexedDB lookup and
+   * fails with "No key or key range specified". That single failure took down
+   * getChats, getChatById and, with them, every group endpoint.
+   *
+   * Defining the property on the prototype fixes the library unmodified,
+   * instead of patching each call site. Safe if a future build brings it back:
+   * the descriptor is only installed when it is missing.
+   */
+  private async patchSerializedIds(): Promise<void> {
+    const page = (this.client as unknown as { pupPage?: PageLike }).pupPage;
+    if (!page) {
+      return;
+    }
+
+    try {
+      const applied = await page.evaluate(() => {
+        const scope = window as unknown as {
+          require: (m: string) => { createWid: (v: string) => object };
+        };
+        const applied: string[] = [];
+
+        const define = (
+          proto: object,
+          label: string,
+          compute: (self: Record<string, unknown>) => string,
+        ) => {
+          if (Object.getOwnPropertyDescriptor(proto, '_serialized')) {
+            applied.push(`${label}:already-present`);
+            return;
+          }
+          Object.defineProperty(proto, '_serialized', {
+            configurable: true,
+            get(this: Record<string, unknown>) {
+              return compute(this);
+            },
+          });
+          applied.push(`${label}:installed`);
+        };
+
+        // Deliberately NOT patching Wid: live testing showed the chat/contact
+        // ids already carry `_serialized` on this build, and shimming their
+        // prototype made several group actions resolve the wrong id.
+
+        // Message keys carry the same problem, and getChatModel feeds one to an
+        // IndexedDB lookup while building a chat's last message.
+        const keyFactory = scope.require('WAWebMsgKey') as unknown as {
+          fromString?: (v: string) => object;
+        };
+        const keySample = keyFactory.fromString?.('true_0@c.us_AAAAAAAA');
+        if (keySample) {
+          define(
+            Object.getPrototypeOf(keySample) as object,
+            'msgKey',
+            (self) => {
+              for (const key of Object.keys(self)) {
+                const value = self[key];
+                if (typeof value === 'string' && /^(true|false)_/.test(value)) {
+                  return value;
+                }
+              }
+              const remote = self.remote as { _serialized?: string } | string;
+              const parts = [
+                String(Boolean(self.fromMe)),
+                typeof remote === 'string'
+                  ? remote
+                  : String(remote?._serialized),
+                String(self.id),
+              ];
+              if (typeof self.self === 'string' && self.self) {
+                parts.push(self.self);
+              }
+              return parts.join('_');
+            },
+          );
+        } else {
+          applied.push('msgKey:no-sample');
+        }
+
+        return applied.join(', ');
+      });
+
+      this.logger.log(`🩹 _serialized shims → ${applied}`);
+    } catch (err) {
+      this.logger.warn(
+        `Could not install the _serialized shims: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /**

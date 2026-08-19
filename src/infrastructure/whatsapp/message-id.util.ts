@@ -57,3 +57,38 @@ export function serializeMessageId(raw: unknown): string {
   }
   return parts.join('_');
 }
+
+/**
+ * Same problem, different object: chat/contact ids (Wids) also lose
+ * `_serialized` on some builds. Rebuilds `<user>@<server>` when needed.
+ */
+export function serializeWid(raw: unknown): string {
+  if (typeof raw === 'string') {
+    return raw;
+  }
+  if (!raw || typeof raw !== 'object') {
+    return '';
+  }
+
+  const wid = raw as Record<string, unknown>;
+
+  if (typeof wid._serialized === 'string' && wid._serialized) {
+    return wid._serialized;
+  }
+
+  for (const value of Object.values(wid)) {
+    if (typeof value === 'string' && value.includes('@')) {
+      return value;
+    }
+  }
+
+  const { user, server, device } = wid;
+  if (typeof user !== 'string' || typeof server !== 'string') {
+    return '';
+  }
+  const suffix =
+    typeof device === 'string' || typeof device === 'number'
+      ? `:${device}`
+      : '';
+  return `${user}${suffix}@${server}`;
+}

@@ -81,6 +81,15 @@ export function toWhatsappException(
     return WhatsappException.conflict(`${context}: ${raw}`);
   }
 
+  // whatsapp-web.js lets minified errors from the page through: their message
+  // is a single letter, useless to a caller. Report the operation instead.
+  if (raw.length <= 2) {
+    return new WhatsappException(
+      `${context}: WhatsApp rejected the operation (no reason given).`,
+      HttpStatus.CONFLICT,
+    );
+  }
+
   return new HttpException(
     `${context}: ${raw}`,
     HttpStatus.INTERNAL_SERVER_ERROR,
