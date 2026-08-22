@@ -66,6 +66,7 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
   private outgoingWaiters: OutgoingWaiter[] = [];
   /** WhatsApp Web build currently loaded, read once the client is ready. */
   private webVersion: string | null = null;
+  private watchdogTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly chatHistory: ChatHistoryService,
@@ -75,6 +76,7 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     this.initClient();
+    this.startWatchdog();
   }
 
   private initClient() {
@@ -84,7 +86,14 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
     this.client = new Client({
       authStrategy: new LocalAuth(),
       puppeteer: {
-        args: ['--no-sandbox'],
+        // Chrome crashes on headless servers without these: /dev/shm is small
+        // in containers and VMs, and there is no GPU to talk to.
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+        ],
       },
       ...pinnedWebVersion(),
     });
@@ -116,6 +125,7 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('✅ WhatsApp client is ready');
 
       void this.patchSerializedIds();
+      this.watchBrowser();
 
       // Recorded once: when whatsapp-web.js breaks it is almost always because
       // WhatsApp shipped a new web build, and this is the first thing to check.
@@ -243,6 +253,10 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
    * the next init crashes with "window['onQRChangedEvent'] already exists!".
    */
   async onModuleDestroy() {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -277,6 +291,12 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
   }
 
   private assertReady(): void {
+    if (this.status === 'READY' && !this.isBrowserAlive()) {
+      this.status = 'DISCONNECTED';
+      this.logger.error('💥 Browser gone — reconnecting');
+      this.scheduleReconnect();
+    }
+
     if (this.status !== 'READY') {
       throw new ServiceUnavailableException(
         `WhatsApp client not ready (status: ${this.status}). Scan the QR (GET /api/whatsapp/qr) and wait for READY.`,
@@ -292,6 +312,64 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
   async withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     this.assertReady();
     return this.pool.run(() => fn(this.client));
+  }
+
+  /**
+   * Reacts to Chrome dying.
+   *
+   * whatsapp-web.js only emits `disconnected` when WhatsApp closes the session;
+   * when the browser itself crashes, nothing is emitted, the client keeps
+   * reporting READY and every operation fails with "Attempted to use detached
+   * Frame" until someone restarts the process by hand. Puppeteer does signal
+   * it, so we listen there and reconnect.
+   */
+  private watchBrowser(): void {
+    const browser = (
+      this.client as unknown as {
+        pupBrowser?: { on?: (event: string, cb: () => void) => void };
+      }
+    ).pupBrowser;
+
+    browser?.on?.('disconnected', () => {
+      if (this.status === 'DISCONNECTED') {
+        return;
+      }
+      this.status = 'DISCONNECTED';
+      this.logger.error('💥 Chrome died — reconnecting');
+      this.scheduleReconnect();
+    });
+  }
+
+  /** True when puppeteer still has a live browser. */
+  private isBrowserAlive(): boolean {
+    const browser = (
+      this.client as unknown as {
+        pupBrowser?: { connected?: boolean; isConnected?: () => boolean };
+      }
+    ).pupBrowser;
+
+    if (!browser) {
+      return false;
+    }
+    if (typeof browser.connected === 'boolean') {
+      return browser.connected;
+    }
+    return browser.isConnected?.() ?? true;
+  }
+
+  /**
+   * Backstop for the case where the disconnect event never arrives: if we claim
+   * to be READY while the browser is gone, force the reconnect.
+   */
+  private startWatchdog(): void {
+    this.watchdogTimer = setInterval(() => {
+      if (this.status === 'READY' && !this.isBrowserAlive()) {
+        this.status = 'DISCONNECTED';
+        this.logger.error('💥 Browser gone while READY — reconnecting');
+        this.scheduleReconnect();
+      }
+    }, 30000);
+    this.watchdogTimer.unref?.();
   }
 
   /**
