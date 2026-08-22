@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { Client, LocalAuth, Message } from 'whatsapp-web.js';
 import * as QRCode from 'qrcode';
-import { promises as fs } from 'fs';
+import { promises as fs, default as fsSync } from 'fs';
 import * as path from 'path';
 import { ChatHistoryService } from './chat-history.service';
 import { WebhookService } from './webhook.service';
@@ -82,6 +82,7 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
   private initClient() {
     // A new browser session invalidates the cached lookups.
     this.resolvedLids = new Set<string>();
+    this.clearBrowserLocks();
 
     this.client = new Client({
       authStrategy: new LocalAuth(),
@@ -312,6 +313,41 @@ export class WwebService implements OnModuleInit, OnModuleDestroy {
   async withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     this.assertReady();
     return this.pool.run(() => fn(this.client));
+  }
+
+  /**
+   * Removes the lock files a crashed Chrome leaves behind.
+   *
+   * They point at a process id that no longer exists; the next Chrome sees the
+   * lock, assumes another instance owns the profile and exits immediately,
+   * which leaves the client hanging in INITIALIZING forever. Deleting them is
+   * safe — they are locks, not session data.
+   */
+  private clearBrowserLocks(): void {
+    const sessionRoot = path.join(process.cwd(), '.wwebjs_auth');
+
+    try {
+      for (const dir of fsSync.readdirSync(sessionRoot)) {
+        if (!dir.startsWith('session')) {
+          continue;
+        }
+        for (const lock of [
+          'SingletonLock',
+          'SingletonCookie',
+          'SingletonSocket',
+        ]) {
+          const target = path.join(sessionRoot, dir, lock);
+          try {
+            fsSync.unlinkSync(target);
+            this.logger.log(`🧹 Removed stale ${lock}`);
+          } catch {
+            // Not there: nothing to clean.
+          }
+        }
+      }
+    } catch {
+      // No session directory yet — first run.
+    }
   }
 
   /**
